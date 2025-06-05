@@ -322,13 +322,13 @@ function extractTransactionsByPattern(lines) {
 
   // Try multiple regex patterns for different Starling Bank formats
   const patterns = [
-    // Pattern 1: DD/MM/YYYY Description £Amount
+    // Pattern 1: DD/MM/YYYY Description £Amount (with potential negative sign)
     /(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/,
     // Pattern 2: DD-MM-YYYY Description £Amount
     /(\d{1,2}-\d{1,2}-\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/,
     // Pattern 3: DD MMM YYYY Description £Amount
     /(\d{1,2}\s+\w{3}\s+\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/,
-    // Pattern 4: Amount at the end without £
+    // Pattern 4: Amount at the end without £ (but with potential negative)
     /(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+?)\s+([-+]?\s*\d+\.\d{2})\s*$/,
     // Pattern 5: Just look for any line with date and amount
     /(\d{1,2}[/-]\d{1,2}[/-]\d{4}).*?([-+]?\s*£?\d+\.\d{2})/,
@@ -348,7 +348,7 @@ function extractTransactionsByPattern(lines) {
       const match = line.match(pattern)
 
       if (match) {
-        console.log(`Found transaction match (pattern ${patternIndex}) at line ${i}`)
+        console.log(`Found transaction match (pattern ${patternIndex}) at line ${i}: "${line}"`)
 
         let dateStr, description, amountStr
 
@@ -364,12 +364,10 @@ function extractTransactionsByPattern(lines) {
           continue
         }
 
-        // Parse amount
-        const amount = parseAmount(amountStr)
+        // Parse amount and determine type
+        const { amount, type } = parseAmountAndType(amountStr, description)
 
         if (amount > 0) {
-          const type = amountStr.includes("-") ? "expense" : "income"
-
           const transaction = {
             date: dateStr,
             description: description.trim(),
@@ -380,7 +378,7 @@ function extractTransactionsByPattern(lines) {
           }
 
           transactions.push(transaction)
-          console.log(`Added transaction: ${dateStr} - ${type} - £${amount}`)
+          console.log(`Added transaction: ${dateStr} - ${type} - £${amount} - ${description.substring(0, 30)}`)
           break // Stop trying other patterns for this line
         }
       }
@@ -391,25 +389,159 @@ function extractTransactionsByPattern(lines) {
 }
 
 /**
- * Parse amount from string
+ * Parse amount from string and determine transaction type
  * @param {string} amountStr - Amount string
- * @returns {number} Parsed amount
+ * @param {string} description - Transaction description
+ * @returns {Object} {amount: number, type: string}
  */
-function parseAmount(amountStr) {
-  if (!amountStr) return 0
+function parseAmountAndType(amountStr, description) {
+  if (!amountStr) return { amount: 0, type: "unknown" }
 
   // Remove currency symbol, spaces, and commas
   let cleaned = amountStr.replace(/£|\s|,/g, "")
 
-  // Handle negative amounts (could be with - or parentheses)
+  // Check if it's negative (could be with - or parentheses)
   const isNegative = cleaned.includes("-") || (cleaned.includes("(") && cleaned.includes(")"))
   cleaned = cleaned.replace(/[-()]/g, "")
 
   // Parse as float
   const amount = Number.parseFloat(cleaned)
 
-  // Return absolute value (sign is handled by transaction type)
-  return isNaN(amount) ? 0 : amount
+  if (isNaN(amount) || amount === 0) {
+    return { amount: 0, type: "unknown" }
+  }
+
+  // Determine transaction type based on various factors
+  let type = "income" // Default to income
+
+  // Check if explicitly negative
+  if (isNegative) {
+    type = "expense"
+  } else {
+    // Use description to determine type
+    type = determineTypeFromDescription(description)
+  }
+
+  return { amount, type }
+}
+
+/**
+ * Determine transaction type from description
+ * @param {string} description - Transaction description
+ * @returns {string} "income" or "expense"
+ */
+function determineTypeFromDescription(description) {
+  if (!description) return "income"
+
+  const desc = description.toLowerCase()
+
+  // Common expense keywords
+  const expenseKeywords = [
+    "payment",
+    "purchase",
+    "withdrawal",
+    "atm",
+    "fee",
+    "charge",
+    "debit",
+    "transfer out",
+    "standing order",
+    "direct debit",
+    "card payment",
+    "contactless",
+    "chip and pin",
+    "online payment",
+    "bill payment",
+    "subscription",
+    "refund to",
+    "amazon",
+    "tesco",
+    "sainsbury",
+    "asda",
+    "morrisons",
+    "waitrose",
+    "aldi",
+    "lidl",
+    "uber",
+    "deliveroo",
+    "just eat",
+    "restaurant",
+    "cafe",
+    "coffee",
+    "petrol",
+    "fuel",
+    "parking",
+    "transport",
+    "train",
+    "bus",
+    "taxi",
+    "hotel",
+    "booking",
+    "airbnb",
+    "netflix",
+    "spotify",
+    "apple",
+    "google",
+    "microsoft",
+    "paypal",
+    "ebay",
+    "argos",
+    "currys",
+    "john lewis",
+    "marks spencer",
+    "next",
+    "zara",
+    "h&m",
+    "primark",
+  ]
+
+  // Common income keywords
+  const incomeKeywords = [
+    "salary",
+    "wage",
+    "payroll",
+    "deposit",
+    "credit",
+    "transfer in",
+    "refund from",
+    "cashback",
+    "interest",
+    "dividend",
+    "bonus",
+    "freelance",
+    "invoice",
+    "payment received",
+    "faster payment in",
+    "bacs credit",
+    "standing order in",
+  ]
+
+  // Check for expense keywords
+  for (const keyword of expenseKeywords) {
+    if (desc.includes(keyword)) {
+      return "expense"
+    }
+  }
+
+  // Check for income keywords
+  for (const keyword of incomeKeywords) {
+    if (desc.includes(keyword)) {
+      return "income"
+    }
+  }
+
+  // Default to income if we can't determine
+  return "income"
+}
+
+/**
+ * Parse amount from string (legacy function for compatibility)
+ * @param {string} amountStr - Amount string
+ * @returns {number} Parsed amount
+ */
+function parseAmount(amountStr) {
+  const { amount } = parseAmountAndType(amountStr, "")
+  return amount
 }
 
 /**
@@ -429,6 +561,9 @@ function categorizeTransaction(description) {
   }
   if (description.includes("interest")) {
     return "Income:Interest"
+  }
+  if (description.includes("freelance") || description.includes("invoice")) {
+    return "Income:Freelance"
   }
 
   // Expense categories
@@ -461,6 +596,26 @@ function categorizeTransaction(description) {
     description.includes("currys")
   ) {
     return "Expenses:Shopping"
+  }
+  if (
+    description.includes("petrol") ||
+    description.includes("fuel") ||
+    description.includes("parking") ||
+    description.includes("transport") ||
+    description.includes("train") ||
+    description.includes("bus") ||
+    description.includes("taxi")
+  ) {
+    return "Expenses:Transport"
+  }
+  if (
+    description.includes("netflix") ||
+    description.includes("spotify") ||
+    description.includes("subscription") ||
+    description.includes("apple") ||
+    description.includes("google")
+  ) {
+    return "Expenses:Subscriptions"
   }
 
   return "Uncategorized"
