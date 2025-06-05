@@ -214,7 +214,7 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
           amount: tx.amount,
           type: tx.type,
           category: tx.category,
-          currency: tx.currency || "GBP",
+          // Removed currency field since it doesn't exist in the table
         })),
       )
 
