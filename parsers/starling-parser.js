@@ -27,7 +27,7 @@ async function parseStarlingStatement(buffer) {
 
     console.log(`Processing ${lines.length} lines for transactions...`)
 
-    // Find the header row
+    // Find the header row with IN/OUT columns
     const headerInfo = findTransactionHeader(lines)
     console.log(`Transaction header found: ${JSON.stringify(headerInfo)}`)
 
@@ -57,7 +57,7 @@ async function parseStarlingStatement(buffer) {
 }
 
 /**
- * Find the transaction header row
+ * Find the transaction header row with IN/OUT columns
  * @param {Array} lines - Array of text lines
  * @returns {Object} Header information
  */
@@ -73,80 +73,85 @@ function findTransactionHeader(lines) {
     balanceIndex: -1,
   }
 
-  // Common header terms
-  const dateTerms = ["date", "day", "when"]
-  const descriptionTerms = ["description", "details", "transaction", "particulars", "narrative"]
-  const inTerms = ["in", "credit", "deposit", "received", "money in"]
-  const outTerms = ["out", "debit", "payment", "paid", "money out", "withdrawal"]
-  const balanceTerms = ["balance", "closing", "end of day"]
-
+  // Look for lines that contain both "IN" and "OUT" or similar column headers
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].toLowerCase()
+    const originalLine = lines[i]
 
     // Skip very short lines
     if (line.length < 10) continue
 
-    // Check if this line looks like a header
-    let potentialHeader = false
-
-    // Check for date terms
-    for (const term of dateTerms) {
-      if (line.includes(term)) {
-        potentialHeader = true
-        break
-      }
-    }
-
-    // If it might be a header, check for other column terms
-    if (potentialHeader) {
-      console.log(`Potential header at line ${i}: "${lines[i]}"`)
+    // Look for lines that might be headers with IN/OUT columns
+    if (
+      (line.includes("in") && line.includes("out")) ||
+      (line.includes("credit") && line.includes("debit")) ||
+      (line.includes("money in") && line.includes("money out"))
+    ) {
+      console.log(`Potential IN/OUT header at line ${i}: "${originalLine}"`)
 
       // Split the line into potential columns
-      const columns = line
+      const columns = originalLine
         .split(/\s{2,}/)
         .map((col) => col.trim())
         .filter((col) => col.length > 0)
-      console.log(`Potential columns: ${JSON.stringify(columns)}`)
+
+      console.log(`Header columns: ${JSON.stringify(columns)}`)
 
       if (columns.length >= 3) {
-        // At minimum we need date, description, and amount
         headerInfo.found = true
         headerInfo.index = i
         headerInfo.columns = columns
 
         // Identify column positions
         columns.forEach((col, index) => {
+          const colLower = col.toLowerCase()
+
           // Check for date column
-          if (dateTerms.some((term) => col.includes(term))) {
+          if (colLower.includes("date") || colLower.includes("day")) {
             headerInfo.dateIndex = index
           }
 
           // Check for description column
-          if (descriptionTerms.some((term) => col.includes(term))) {
+          if (
+            colLower.includes("description") ||
+            colLower.includes("details") ||
+            colLower.includes("transaction") ||
+            colLower.includes("particulars")
+          ) {
             headerInfo.descriptionIndex = index
           }
 
-          // Check for in/credit column
-          if (inTerms.some((term) => col.includes(term))) {
+          // Check for IN/credit column
+          if (
+            colLower.includes("in") ||
+            colLower.includes("credit") ||
+            colLower.includes("money in") ||
+            colLower.includes("received")
+          ) {
             headerInfo.inIndex = index
+            console.log(`Found IN column at index ${index}: "${col}"`)
           }
 
-          // Check for out/debit column
-          if (outTerms.some((term) => col.includes(term))) {
+          // Check for OUT/debit column
+          if (
+            colLower.includes("out") ||
+            colLower.includes("debit") ||
+            colLower.includes("money out") ||
+            colLower.includes("paid")
+          ) {
             headerInfo.outIndex = index
+            console.log(`Found OUT column at index ${index}: "${col}"`)
           }
 
           // Check for balance column
-          if (balanceTerms.some((term) => col.includes(term))) {
+          if (colLower.includes("balance") || colLower.includes("closing")) {
             headerInfo.balanceIndex = index
           }
         })
 
-        // If we found enough columns, break
-        if (
-          headerInfo.dateIndex !== -1 &&
-          (headerInfo.descriptionIndex !== -1 || headerInfo.inIndex !== -1 || headerInfo.outIndex !== -1)
-        ) {
+        // If we found IN and OUT columns, we're good
+        if (headerInfo.inIndex !== -1 && headerInfo.outIndex !== -1) {
+          console.log(`✅ Found proper IN/OUT header structure`)
           break
         }
       }
@@ -191,13 +196,14 @@ function extractTransactionsFromStructure(lines, headerInfo) {
   const transactions = []
 
   if (!headerInfo.found || headerInfo.index === -1) {
-    console.log("No header structure found, falling back to pattern matching")
+    console.log("No IN/OUT header structure found, falling back to pattern matching")
     return extractTransactionsByPattern(lines)
   }
 
   // Start processing from the line after the header
   const startIndex = headerInfo.index + 1
   console.log(`Starting transaction extraction from line ${startIndex}`)
+  console.log(`IN column at index: ${headerInfo.inIndex}, OUT column at index: ${headerInfo.outIndex}`)
 
   // Date patterns to recognize
   const datePatterns = [
@@ -211,37 +217,40 @@ function extractTransactionsFromStructure(lines, headerInfo) {
     const line = lines[i].trim()
 
     // Skip empty lines or obvious non-transaction lines
-    if (line.length < 5 || line.toLowerCase().includes("page") || line.toLowerCase().includes("statement")) {
+    if (
+      line.length < 5 ||
+      line.toLowerCase().includes("page") ||
+      line.toLowerCase().includes("statement") ||
+      line.toLowerCase().includes("total") ||
+      line.toLowerCase().includes("balance brought forward")
+    ) {
       continue
     }
 
-    // Split the line into columns based on multiple spaces
+    // Split the line into columns based on multiple spaces or tabs
     const columns = line
-      .split(/\s{2,}/)
+      .split(/\s{2,}|\t/)
       .map((col) => col.trim())
       .filter((col) => col.length > 0)
 
-    // Debug column structure
-    if (columns.length >= 2) {
-      console.log(`Line ${i} columns: ${columns.length}`)
-    }
-
-    // Check if this looks like a transaction line
-    if (columns.length >= 2) {
-      // Try to identify a date in the first column
-      const firstCol = columns[0]
+    // Check if this looks like a transaction line (should have enough columns)
+    if (columns.length >= Math.max(headerInfo.inIndex, headerInfo.outIndex) + 1) {
+      // Try to identify a date in the expected date column
+      const dateCol = columns[headerInfo.dateIndex] || columns[0]
       let isTransactionLine = false
 
       for (const pattern of datePatterns) {
-        if (pattern.test(firstCol)) {
+        if (pattern.test(dateCol)) {
           isTransactionLine = true
           break
         }
       }
 
-      // If it has a date, process as transaction
       if (isTransactionLine) {
-        const date = columns[headerInfo.dateIndex] || columns[0]
+        console.log(`Processing transaction line ${i}: "${line}"`)
+        console.log(`Columns (${columns.length}): ${JSON.stringify(columns)}`)
+
+        const date = dateCol
         let description = ""
         let amount = 0
         let type = "unknown"
@@ -249,55 +258,55 @@ function extractTransactionsFromStructure(lines, headerInfo) {
         // Get description
         if (headerInfo.descriptionIndex !== -1 && headerInfo.descriptionIndex < columns.length) {
           description = columns[headerInfo.descriptionIndex]
-        } else if (columns.length > 1) {
-          description = columns[1] // Assume second column is description
-        }
-
-        // Get amount - check both in and out columns
-        if (headerInfo.inIndex !== -1 && headerInfo.inIndex < columns.length) {
-          const inAmount = parseAmount(columns[headerInfo.inIndex])
-          if (inAmount > 0) {
-            amount = inAmount
-            type = "income"
-          }
-        }
-
-        if (amount === 0 && headerInfo.outIndex !== -1 && headerInfo.outIndex < columns.length) {
-          const outAmount = parseAmount(columns[headerInfo.outIndex])
-          if (outAmount > 0) {
-            amount = outAmount
-            type = "expense"
-          }
-        }
-
-        // If we couldn't find amount in specific columns, look for any column with currency symbol
-        if (amount === 0) {
-          for (const col of columns) {
-            if (col.includes("£") || /\d+\.\d{2}/.test(col)) {
-              const parsedAmount = parseAmount(col)
-              if (parsedAmount > 0) {
-                amount = parsedAmount
-                // Determine type based on context or position
-                type = col.includes("-") ? "expense" : "income"
-                break
+        } else {
+          // Find the description column (usually the longest text column that's not a number)
+          for (let j = 1; j < columns.length; j++) {
+            if (j !== headerInfo.inIndex && j !== headerInfo.outIndex && j !== headerInfo.balanceIndex) {
+              if (!/^\d+\.?\d*$/.test(columns[j]) && columns[j].length > description.length) {
+                description = columns[j]
               }
             }
           }
         }
 
+        // Check IN column (credits/deposits)
+        if (headerInfo.inIndex !== -1 && headerInfo.inIndex < columns.length) {
+          const inAmount = parseAmount(columns[headerInfo.inIndex])
+          if (inAmount > 0) {
+            amount = inAmount // Positive amount for income
+            type = "income"
+            console.log(`Found IN transaction: £${amount}`)
+          }
+        }
+
+        // Check OUT column (debits/payments) - multiply by -1
+        if (amount === 0 && headerInfo.outIndex !== -1 && headerInfo.outIndex < columns.length) {
+          const outAmount = parseAmount(columns[headerInfo.outIndex])
+          if (outAmount > 0) {
+            amount = outAmount * -1 // Negative amount for expenses
+            type = "expense"
+            console.log(`Found OUT transaction: £${Math.abs(amount)} (stored as ${amount})`)
+          }
+        }
+
         // If we found a valid transaction, add it
-        if (amount > 0) {
+        if (amount !== 0) {
           const transaction = {
             date,
             description: description || "Transaction",
-            amount,
-            type,
+            amount: Math.abs(amount), // Store absolute value
+            type: amount > 0 ? "income" : "expense", // Determine type from sign
             category: categorizeTransaction(description),
             currency: "GBP",
+            rawAmount: amount, // Keep the signed amount for debugging
           }
 
           transactions.push(transaction)
-          console.log(`Added transaction: ${date} - ${type} - £${amount}`)
+          console.log(
+            `✅ Added transaction: ${date} - ${transaction.type} - £${transaction.amount} - ${description.substring(0, 30)}`,
+          )
+        } else {
+          console.log(`⚠️ No amount found in IN/OUT columns for line: ${line}`)
         }
       }
     }
@@ -305,7 +314,7 @@ function extractTransactionsFromStructure(lines, headerInfo) {
 
   // If we didn't find any transactions with the structure approach, try pattern matching
   if (transactions.length === 0) {
-    console.log("No transactions found with structure approach, trying pattern matching")
+    console.log("No transactions found with IN/OUT structure approach, trying pattern matching")
     return extractTransactionsByPattern(lines)
   }
 
@@ -322,16 +331,12 @@ function extractTransactionsByPattern(lines) {
 
   // Try multiple regex patterns for different Starling Bank formats
   const patterns = [
-    // Pattern 1: DD/MM/YYYY Description £Amount (with potential negative sign)
-    /(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/,
-    // Pattern 2: DD-MM-YYYY Description £Amount
-    /(\d{1,2}-\d{1,2}-\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/,
-    // Pattern 3: DD MMM YYYY Description £Amount
-    /(\d{1,2}\s+\w{3}\s+\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/,
-    // Pattern 4: Amount at the end without £ (but with potential negative)
-    /(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+?)\s+([-+]?\s*\d+\.\d{2})\s*$/,
-    // Pattern 5: Just look for any line with date and amount
-    /(\d{1,2}[/-]\d{1,2}[/-]\d{4}).*?([-+]?\s*£?\d+\.\d{2})/,
+    // Pattern 1: DD/MM/YYYY Description Amount Amount (IN/OUT format)
+    /(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+?)\s+(\d+\.\d{2})\s+(\d+\.\d{2})/,
+    // Pattern 2: DD/MM/YYYY Description £Amount
+    /(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+?)\s+£(\d+\.\d{2})/,
+    // Pattern 3: DD/MM/YYYY Description Amount (no £)
+    /(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+?)\s+(\d+\.\d{2})\s*$/,
   ]
 
   for (let i = 0; i < lines.length; i++) {
@@ -350,37 +355,63 @@ function extractTransactionsByPattern(lines) {
       if (match) {
         console.log(`Found transaction match (pattern ${patternIndex}) at line ${i}: "${line}"`)
 
-        let dateStr, description, amountStr
+        let dateStr, description, amount1, amount2
 
-        if (match.length >= 4) {
+        if (match.length === 5) {
+          // Pattern with two amounts (IN/OUT format)
           dateStr = match[1]
           description = match[2]
-          amountStr = match[3]
-        } else if (match.length === 3) {
-          dateStr = match[1]
-          description = "Transaction"
-          amountStr = match[2]
-        } else {
-          continue
-        }
+          amount1 = Number.parseFloat(match[3])
+          amount2 = Number.parseFloat(match[4])
 
-        // Parse amount and determine type
-        const { amount, type } = parseAmountAndType(amountStr, description)
-
-        if (amount > 0) {
-          const transaction = {
-            date: dateStr,
-            description: description.trim(),
-            amount,
-            type,
-            category: categorizeTransaction(description),
-            currency: "GBP",
+          // Assume first amount is OUT (expense), second is IN (income)
+          // This is a guess - you might need to adjust based on actual format
+          if (amount1 > 0) {
+            const transaction = {
+              date: dateStr,
+              description: description.trim(),
+              amount: amount1,
+              type: "expense",
+              category: categorizeTransaction(description),
+              currency: "GBP",
+            }
+            transactions.push(transaction)
           }
+          if (amount2 > 0) {
+            const transaction = {
+              date: dateStr,
+              description: description.trim(),
+              amount: amount2,
+              type: "income",
+              category: categorizeTransaction(description),
+              currency: "GBP",
+            }
+            transactions.push(transaction)
+          }
+        } else if (match.length === 4) {
+          // Pattern with single amount
+          dateStr = match[1]
+          description = match[2]
+          const amount = Number.parseFloat(match[3])
 
-          transactions.push(transaction)
-          console.log(`Added transaction: ${dateStr} - ${type} - £${amount} - ${description.substring(0, 30)}`)
-          break // Stop trying other patterns for this line
+          if (amount > 0) {
+            // Determine type from description
+            const type = determineTypeFromDescription(description)
+
+            const transaction = {
+              date: dateStr,
+              description: description.trim(),
+              amount,
+              type,
+              category: categorizeTransaction(description),
+              currency: "GBP",
+            }
+
+            transactions.push(transaction)
+            console.log(`Added transaction: ${dateStr} - ${type} - £${amount}`)
+          }
         }
+        break // Stop trying other patterns for this line
       }
     }
   }
@@ -389,44 +420,28 @@ function extractTransactionsByPattern(lines) {
 }
 
 /**
- * Parse amount from string and determine transaction type
+ * Parse amount from string
  * @param {string} amountStr - Amount string
- * @param {string} description - Transaction description
- * @returns {Object} {amount: number, type: string}
+ * @returns {number} Parsed amount (always positive)
  */
-function parseAmountAndType(amountStr, description) {
-  if (!amountStr) return { amount: 0, type: "unknown" }
+function parseAmount(amountStr) {
+  if (!amountStr || amountStr.trim() === "") return 0
 
   // Remove currency symbol, spaces, and commas
   let cleaned = amountStr.replace(/£|\s|,/g, "")
 
-  // Check if it's negative (could be with - or parentheses)
-  const isNegative = cleaned.includes("-") || (cleaned.includes("(") && cleaned.includes(")"))
+  // Remove any parentheses or negative signs for now
   cleaned = cleaned.replace(/[-()]/g, "")
 
   // Parse as float
   const amount = Number.parseFloat(cleaned)
 
-  if (isNaN(amount) || amount === 0) {
-    return { amount: 0, type: "unknown" }
-  }
-
-  // Determine transaction type based on various factors
-  let type = "income" // Default to income
-
-  // Check if explicitly negative
-  if (isNegative) {
-    type = "expense"
-  } else {
-    // Use description to determine type
-    type = determineTypeFromDescription(description)
-  }
-
-  return { amount, type }
+  // Return absolute value
+  return isNaN(amount) ? 0 : Math.abs(amount)
 }
 
 /**
- * Determine transaction type from description
+ * Determine transaction type from description (fallback method)
  * @param {string} description - Transaction description
  * @returns {string} "income" or "expense"
  */
@@ -453,67 +468,6 @@ function determineTypeFromDescription(description) {
     "online payment",
     "bill payment",
     "subscription",
-    "refund to",
-    "amazon",
-    "tesco",
-    "sainsbury",
-    "asda",
-    "morrisons",
-    "waitrose",
-    "aldi",
-    "lidl",
-    "uber",
-    "deliveroo",
-    "just eat",
-    "restaurant",
-    "cafe",
-    "coffee",
-    "petrol",
-    "fuel",
-    "parking",
-    "transport",
-    "train",
-    "bus",
-    "taxi",
-    "hotel",
-    "booking",
-    "airbnb",
-    "netflix",
-    "spotify",
-    "apple",
-    "google",
-    "microsoft",
-    "paypal",
-    "ebay",
-    "argos",
-    "currys",
-    "john lewis",
-    "marks spencer",
-    "next",
-    "zara",
-    "h&m",
-    "primark",
-  ]
-
-  // Common income keywords
-  const incomeKeywords = [
-    "salary",
-    "wage",
-    "payroll",
-    "deposit",
-    "credit",
-    "transfer in",
-    "refund from",
-    "cashback",
-    "interest",
-    "dividend",
-    "bonus",
-    "freelance",
-    "invoice",
-    "payment received",
-    "faster payment in",
-    "bacs credit",
-    "standing order in",
   ]
 
   // Check for expense keywords
@@ -523,25 +477,8 @@ function determineTypeFromDescription(description) {
     }
   }
 
-  // Check for income keywords
-  for (const keyword of incomeKeywords) {
-    if (desc.includes(keyword)) {
-      return "income"
-    }
-  }
-
-  // Default to income if we can't determine
+  // Default to income
   return "income"
-}
-
-/**
- * Parse amount from string (legacy function for compatibility)
- * @param {string} amountStr - Amount string
- * @returns {number} Parsed amount
- */
-function parseAmount(amountStr) {
-  const { amount } = parseAmountAndType(amountStr, "")
-  return amount
 }
 
 /**
@@ -607,15 +544,6 @@ function categorizeTransaction(description) {
     description.includes("taxi")
   ) {
     return "Expenses:Transport"
-  }
-  if (
-    description.includes("netflix") ||
-    description.includes("spotify") ||
-    description.includes("subscription") ||
-    description.includes("apple") ||
-    description.includes("google")
-  ) {
-    return "Expenses:Subscriptions"
   }
 
   return "Uncategorized"
