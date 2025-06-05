@@ -18,10 +18,10 @@ const port = process.env.PORT || 5000
 // Middleware
 app.use(express.json())
 
-// Update the CORS configuration
+// Updated CORS configuration to allow your Vercel frontend
 app.use(
   cors({
-    origin: ["https://v0-getmybooksdone-frontend.vercel.app", "http://localhost:3000", "https://railway.com"],
+    origin: ["https://v0-getmybooksdone-frontend.vercel.app", "http://localhost:3000"],
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -111,4 +111,3 @@ app.get("/", (req, res) => {
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`)
 })
-
