@@ -92,6 +92,23 @@ const upload = multer({
   },
 })
 
+// Function to convert DD/MM/YYYY to YYYY-MM-DD
+function formatDate(dateStr) {
+  // Check if the date is in DD/MM/YYYY format
+  const ddmmyyyyPattern = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/
+  const match = dateStr.match(ddmmyyyyPattern)
+
+  if (match) {
+    const day = match[1].padStart(2, "0")
+    const month = match[2].padStart(2, "0")
+    const year = match[3]
+    return `${year}-${month}-${day}`
+  }
+
+  // If it's not in DD/MM/YYYY format, return as is
+  return dateStr
+}
+
 // Authentication middleware
 const authenticateUser = async (req, res, next) => {
   try {
@@ -205,14 +222,18 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
 
     // Store transactions in database if any were found
     if (parseResult.success && parseResult.transactions.length > 0) {
+      // Remove duplicate transactions based on date and amount
+      const uniqueTransactions = removeDuplicateTransactions(parseResult.transactions)
+      console.log(`Removed ${parseResult.transactions.length - uniqueTransactions.length} duplicate transactions`)
+
       const { error: txError } = await supabase.from("transactions").insert(
-        parseResult.transactions.map((tx) => ({
+        uniqueTransactions.map((tx) => ({
           user_id: userId,
           upload_id: uploadRecord.id,
-          transaction_date: tx.date, // Changed from 'date' to 'transaction_date'
+          transaction_date: formatDate(tx.date), // Format date to YYYY-MM-DD
           description: tx.description,
           amount: tx.amount,
-          is_income: tx.type === "income", // Changed from 'type' to 'is_income' boolean
+          is_income: tx.type === "income",
           category: tx.category,
         })),
       )
@@ -220,7 +241,7 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       if (txError) {
         console.error("Error storing transactions:", txError)
       } else {
-        console.log(`✅ Stored ${parseResult.transactions.length} transactions`)
+        console.log(`✅ Stored ${uniqueTransactions.length} transactions`)
       }
     }
 
@@ -256,6 +277,65 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
     res.status(500).json({ error: "Failed to process file", details: error.message })
   }
 })
+
+// Add this route after the file processing endpoint
+
+// Route to fix stuck uploads
+app.post("/api/fix-uploads", authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id
+
+    // Find all uploads in "processing" status
+    const { data: stuckUploads, error: findError } = await supabase
+      .from("uploads")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("status", "processing")
+
+    if (findError) {
+      console.error("Error finding stuck uploads:", findError)
+      return res.status(500).json({ error: "Failed to find stuck uploads" })
+    }
+
+    if (!stuckUploads || stuckUploads.length === 0) {
+      return res.json({ message: "No stuck uploads found", fixed: 0 })
+    }
+
+    // Update all stuck uploads to "completed" status
+    const { error: updateError } = await supabase
+      .from("uploads")
+      .update({ status: "completed" })
+      .in(
+        "id",
+        stuckUploads.map((upload) => upload.id),
+      )
+
+    if (updateError) {
+      console.error("Error fixing stuck uploads:", updateError)
+      return res.status(500).json({ error: "Failed to fix stuck uploads" })
+    }
+
+    console.log(`Fixed ${stuckUploads.length} stuck uploads for user ${userId}`)
+    res.json({ message: "Successfully fixed stuck uploads", fixed: stuckUploads.length })
+  } catch (error) {
+    console.error("Error fixing uploads:", error)
+    res.status(500).json({ error: "Failed to fix uploads", details: error.message })
+  }
+})
+
+// Function to remove duplicate transactions
+function removeDuplicateTransactions(transactions) {
+  const seen = new Set()
+  return transactions.filter((tx) => {
+    // Create a unique key for each transaction based on date, amount, and description
+    const key = `${tx.date}-${tx.amount}-${tx.description.substring(0, 10)}`
+    if (seen.has(key)) {
+      return false
+    }
+    seen.add(key)
+    return true
+  })
+}
 
 // Error handling middleware
 app.use((err, req, res, next) => {
