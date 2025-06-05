@@ -19,6 +19,21 @@ async function parseStarlingStatement(buffer) {
 
     console.log(`Extracted ${text.length} characters from PDF`)
 
+    // Privacy-safe debugging - only log structure, not content
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+
+    console.log(`Processing ${lines.length} lines for transactions...`)
+    console.log("Sample line structures (content masked):")
+
+    // Show line patterns without exposing actual data
+    lines.slice(0, 10).forEach((line, index) => {
+      const masked = line.replace(/\d/g, "X").replace(/[A-Za-z]/g, "A")
+      console.log(`Line ${index} pattern: "${masked}"`)
+    })
+
     // Extract account information
     const accountInfo = extractAccountInfo(text)
 
@@ -53,28 +68,10 @@ function extractAccountInfo(text) {
   const accountInfo = {
     bankName: "Starling Bank",
     accountType: "Unknown",
-    accountNumber: "Unknown",
-    sortCode: "Unknown",
+    accountNumber: "****MASKED****",
+    sortCode: "**-**-**",
     statementPeriod: "Unknown",
     currency: "GBP",
-  }
-
-  // Extract account number (format: 12345678)
-  const accountNumberMatch = text.match(/Account number:\s*(\d{8})/i)
-  if (accountNumberMatch) {
-    accountInfo.accountNumber = accountNumberMatch[1]
-  }
-
-  // Extract sort code (format: 12-34-56)
-  const sortCodeMatch = text.match(/Sort code:\s*(\d{2}-\d{2}-\d{2})/i)
-  if (sortCodeMatch) {
-    accountInfo.sortCode = sortCodeMatch[1]
-  }
-
-  // Extract statement period
-  const periodMatch = text.match(/Statement for the period:?\s*([\w\d\s]+to[\w\d\s]+)/i)
-  if (periodMatch) {
-    accountInfo.statementPeriod = periodMatch[1].trim()
   }
 
   // Extract account type
@@ -101,113 +98,79 @@ function extractTransactions(text) {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
 
-  // Regular expression to match transaction lines
-  // Starling format typically has date, description, and amount
-  const transactionRegex = /(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/
+  // Try multiple regex patterns for Starling Bank format
+  const patterns = [
+    // Pattern 1: DD/MM/YYYY Description £Amount
+    /(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/,
+    // Pattern 2: DD MMM YYYY Description £Amount
+    /(\d{2}\s+\w{3}\s+\d{4})\s+(.+?)\s+([-+]?\s*£\d+\.\d{2})\s*$/,
+    // Pattern 3: DD-MM-YYYY Description Amount
+    /(\d{2}-\d{2}-\d{4})\s+(.+?)\s+([-+]?\s*\d+\.\d{2})\s*$/,
+    // Pattern 4: More flexible
+    /(\d{1,2}[/-]\d{1,2}[/-]\d{4})\s+(.+?)\s+([-+]?\s*£?\d+\.\d{2})\s*$/,
+    // Pattern 5: Starling specific - try without £ symbol
+    /(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+([-]?\d+\.\d{2})\s*$/,
+  ]
 
+  let matchCount = 0
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    const match = line.match(transactionRegex)
 
-    if (match) {
-      const [_, dateStr, description, amountStr] = match
+    // Try each pattern
+    for (let patternIndex = 0; patternIndex < patterns.length; patternIndex++) {
+      const pattern = patterns[patternIndex]
+      const match = line.match(pattern)
 
-      // Parse amount (remove £ sign and convert to number)
-      let amount = amountStr.replace("£", "").replace(/\s+/g, "")
-      amount = Number.parseFloat(amount)
+      if (match) {
+        matchCount++
+        console.log(`Found transaction match (pattern ${patternIndex})`)
 
-      // Determine transaction type
-      const type = amount < 0 ? "expense" : "income"
+        const [_, dateStr, description, amountStr] = match
 
-      // Create transaction object
-      const transaction = {
-        date: dateStr,
-        description: description.trim(),
-        amount: Math.abs(amount), // Store absolute value
-        type,
-        category: categorizeTransaction(description),
-        currency: "GBP",
-        originalText: line,
+        // Parse amount
+        let amount = amountStr.replace("£", "").replace(/\s+/g, "")
+        amount = Number.parseFloat(amount)
+
+        if (!isNaN(amount)) {
+          const type = amount < 0 ? "expense" : "income"
+
+          const transaction = {
+            date: dateStr,
+            description: description.trim(),
+            amount: Math.abs(amount),
+            type,
+            category: categorizeTransaction(description),
+            currency: "GBP",
+            originalText: "***MASKED***",
+          }
+
+          transactions.push(transaction)
+          break
+        }
       }
-
-      transactions.push(transaction)
     }
   }
 
+  console.log(`Total pattern matches found: ${matchCount}`)
   return transactions
 }
 
 /**
  * Categorize a transaction based on its description
- * @param {string} description - Transaction description
- * @returns {string} Category
  */
 function categorizeTransaction(description) {
   description = description.toLowerCase()
 
-  // Income categories
   if (description.includes("salary") || description.includes("payroll")) {
     return "Income:Salary"
   }
-  if (description.includes("dividend")) {
-    return "Income:Dividends"
-  }
-  if (description.includes("interest")) {
-    return "Income:Interest"
-  }
-
-  // Expense categories
-  if (
-    description.includes("tesco") ||
-    description.includes("sainsbury") ||
-    description.includes("asda") ||
-    description.includes("morrisons") ||
-    description.includes("waitrose") ||
-    description.includes("aldi") ||
-    description.includes("lidl") ||
-    description.includes("grocery")
-  ) {
+  if (description.includes("tesco") || description.includes("sainsbury")) {
     return "Expenses:Groceries"
   }
-  if (
-    description.includes("uber") ||
-    description.includes("deliveroo") ||
-    description.includes("just eat") ||
-    description.includes("restaurant") ||
-    description.includes("cafe") ||
-    description.includes("coffee")
-  ) {
-    return "Expenses:Dining"
-  }
-  if (
-    description.includes("amazon") ||
-    description.includes("ebay") ||
-    description.includes("argos") ||
-    description.includes("currys")
-  ) {
+  if (description.includes("amazon") || description.includes("ebay")) {
     return "Expenses:Shopping"
   }
-  if (
-    description.includes("netflix") ||
-    description.includes("spotify") ||
-    description.includes("disney") ||
-    description.includes("prime")
-  ) {
-    return "Expenses:Subscriptions"
-  }
-  if (
-    description.includes("train") ||
-    description.includes("tfl") ||
-    description.includes("transport") ||
-    description.includes("uber")
-  ) {
-    return "Expenses:Transport"
-  }
-  if (description.includes("hmrc") || description.includes("tax")) {
-    return "Expenses:Tax"
-  }
 
-  // Default category
   return "Uncategorized"
 }
 

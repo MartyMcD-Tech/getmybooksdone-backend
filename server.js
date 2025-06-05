@@ -120,12 +120,21 @@ const authenticateUser = async (req, res, next) => {
 
 // File processing endpoint
 app.post("/api/process-file", authenticateUser, upload.single("file"), async (req, res) => {
+  // ADD TIMEOUT HERE - at the very beginning
+  const timeout = setTimeout(() => {
+    console.log("⚠️ Processing timeout after 30 seconds")
+    if (!res.headersSent) {
+      res.status(408).json({ error: "Processing timeout" })
+    }
+  }, 30000) // 30 second timeout
+
   try {
     console.log("📁 File upload request received")
     const file = req.file
     const userId = req.user.id
 
     if (!file) {
+      clearTimeout(timeout) // CLEAR TIMEOUT
       return res.status(400).json({ error: "No file uploaded" })
     }
 
@@ -227,6 +236,7 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       .eq("id", uploadRecord.id)
 
     console.log("✅ File processed successfully")
+    clearTimeout(timeout) // CLEAR TIMEOUT BEFORE RESPONSE
     res.json({
       uploadId: uploadRecord.id,
       summary: {
@@ -242,6 +252,7 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       transactionCount: parseResult.transactions.length,
     })
   } catch (error) {
+    clearTimeout(timeout) // CLEAR TIMEOUT ON ERROR
     console.error("File processing error:", error)
     res.status(500).json({ error: "Failed to process file", details: error.message })
   }
@@ -286,3 +297,4 @@ process.on("SIGTERM", () => {
 })
 
 module.exports = app
+
