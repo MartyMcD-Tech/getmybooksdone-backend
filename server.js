@@ -8,7 +8,8 @@ const { v4: uuidv4 } = require("uuid")
 require("dotenv").config()
 
 const app = express()
-const PORT = process.env.PORT || 3001
+// Use Railway's PORT environment variable or default to 8080
+const PORT = process.env.PORT || 8080
 
 // Basic middleware
 app.use(express.json())
@@ -22,6 +23,15 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   }),
 )
+
+// Special test endpoint to verify our code is running
+app.get("/custom-test", (req, res) => {
+  res.json({
+    message: "This is our custom server!",
+    timestamp: new Date().toISOString(),
+    cors: "Configured for v0-getmybooksdone-frontend.vercel.app",
+  })
+})
 
 // Health check route
 app.get("/health", (req, res) => {
@@ -150,6 +160,8 @@ app.use((err, req, res, next) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`)
+  console.log(`Environment: ${process.env.NODE_ENV || "development"}`)
+  console.log(`CORS configured for: https://v0-getmybooksdone-frontend.vercel.app`)
 })
 
 module.exports = app
