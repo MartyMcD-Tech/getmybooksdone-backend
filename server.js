@@ -5,6 +5,7 @@ const { createClient } = require("@supabase/supabase-js")
 const pdf = require("pdf-parse")
 const csv = require("csv-parser")
 const { v4: uuidv4 } = require("uuid")
+const { parseStarlingStatement } = require("./parsers/starling-parser")
 require("dotenv").config()
 
 const app = express()
@@ -130,6 +131,9 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
 
     console.log(`Processing file: ${file.originalname} for user: ${userId}`)
 
+    // Generate a unique file path
+    const filePath = `processed/${uuidv4()}-${file.originalname}`
+
     // Create upload record
     const { data: uploadRecord, error: dbError } = await supabase
       .from("uploads")
@@ -138,8 +142,8 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
         file_name: file.originalname,
         file_type: file.mimetype,
         file_size: `${(file.size / 1024).toFixed(1)} KB`,
-        file_path: `processed/${uuidv4()}-${file.originalname}`,
-        status: "completed",
+        file_path: filePath,
+        status: "processing",
       })
       .select()
       .single()
@@ -149,16 +153,93 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       throw dbError
     }
 
+    // Process the file based on type
+    let parseResult = {
+      success: false,
+      transactions: [],
+      accountInfo: {},
+      transactionCount: 0,
+    }
+
+    if (file.mimetype === "application/pdf") {
+      // Check if it's a Starling Bank statement
+      if (file.originalname.toLowerCase().includes("starling")) {
+        parseResult = await parseStarlingStatement(file.buffer)
+      } else {
+        // Generic PDF parsing
+        const pdfData = await pdf(file.buffer)
+        parseResult = {
+          success: true,
+          transactions: [],
+          accountInfo: {
+            bankName: "Unknown",
+            accountType: "Unknown",
+            statementPeriod: "Unknown",
+          },
+          transactionCount: 0,
+          rawText: pdfData.text,
+        }
+      }
+    } else if (file.mimetype === "text/csv" || file.mimetype === "application/vnd.ms-excel") {
+      // CSV parsing logic would go here
+      parseResult = {
+        success: true,
+        transactions: [],
+        accountInfo: {
+          bankName: "Unknown",
+          accountType: "Unknown",
+          statementPeriod: "Unknown",
+        },
+        transactionCount: 0,
+      }
+    }
+
+    // Store transactions in database if any were found
+    if (parseResult.success && parseResult.transactions.length > 0) {
+      const { error: txError } = await supabase.from("transactions").insert(
+        parseResult.transactions.map((tx) => ({
+          user_id: userId,
+          upload_id: uploadRecord.id,
+          date: tx.date,
+          description: tx.description,
+          amount: tx.amount,
+          type: tx.type,
+          category: tx.category,
+          currency: tx.currency || "GBP",
+        })),
+      )
+
+      if (txError) {
+        console.error("Error storing transactions:", txError)
+      } else {
+        console.log(`✅ Stored ${parseResult.transactions.length} transactions`)
+      }
+    }
+
+    // Update upload record status
+    await supabase
+      .from("uploads")
+      .update({
+        status: "completed",
+        transaction_count: parseResult.transactions.length,
+        account_info: parseResult.accountInfo,
+      })
+      .eq("id", uploadRecord.id)
+
     console.log("✅ File processed successfully")
     res.json({
       uploadId: uploadRecord.id,
       summary: {
-        totalIncome: 0,
-        totalExpenses: 0,
-        transactionCount: 0,
+        totalIncome: parseResult.transactions
+          .filter((tx) => tx.type === "income")
+          .reduce((sum, tx) => sum + tx.amount, 0),
+        totalExpenses: parseResult.transactions
+          .filter((tx) => tx.type === "expense")
+          .reduce((sum, tx) => sum + tx.amount, 0),
+        transactionCount: parseResult.transactions.length,
       },
-      accountInfo: {},
-      transactionCount: 0,
+      accountInfo: parseResult.accountInfo,
+      transactionCount: parseResult.transactions.length,
     })
   } catch (error) {
     console.error("File processing error:", error)
