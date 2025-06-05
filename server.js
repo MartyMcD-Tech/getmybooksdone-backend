@@ -6,10 +6,14 @@ const pdf = require("pdf-parse")
 const csv = require("csv-parser")
 const { v4: uuidv4 } = require("uuid")
 const { parseStarlingStatement } = require("./parsers/starling-parser")
+const AccountCodingService = require("./services/accountCoding")
 require("dotenv").config()
 
 const app = express()
 const PORT = process.env.PORT || 8080
+
+// Initialize account coding service
+const accountCoding = new AccountCodingService()
 
 console.log("🚀 Starting Get My Books Done API...")
 console.log("Environment variables check:")
@@ -135,15 +139,274 @@ const authenticateUser = async (req, res, next) => {
   }
 }
 
-// File processing endpoint
+// Get chart of accounts
+app.get("/api/chart-of-accounts", authenticateUser, async (req, res) => {
+  try {
+    const accounts = accountCoding.getAllAccounts()
+    res.json({ accounts })
+  } catch (error) {
+    console.error("Error fetching chart of accounts:", error)
+    res.status(500).json({ error: "Failed to fetch chart of accounts" })
+  }
+})
+
+// Get transactions with coding details
+app.get("/api/transactions", authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id
+    const { upload_id, status = "all" } = req.query
+
+    let query = supabase
+      .from("transactions")
+      .select(`
+        *,
+        uploads!inner(file_name, created_at)
+      `)
+      .eq("user_id", userId)
+      .order("transaction_date", { ascending: false })
+
+    if (upload_id) {
+      query = query.eq("upload_id", upload_id)
+    }
+
+    if (status !== "all") {
+      if (status === "coded") {
+        query = query.not("account_code", "is", null)
+      } else if (status === "uncoded") {
+        query = query.is("account_code", null)
+      }
+    }
+
+    const { data: transactions, error } = await query
+
+    if (error) {
+      console.error("Error fetching transactions:", error)
+      return res.status(500).json({ error: "Failed to fetch transactions" })
+    }
+
+    // Enhance transactions with account information and suggestions
+    const enhancedTransactions = transactions.map((transaction) => {
+      const account = transaction.account_code ? accountCoding.getAccount(transaction.account_code) : null
+      const suggestions = accountCoding.getSuggestedCodes(
+        transaction.description,
+        transaction.amount,
+        transaction.is_income,
+      )
+
+      return {
+        ...transaction,
+        account_name: account?.name || null,
+        account_type: account?.type || null,
+        tax_code: account?.taxCode || null,
+        suggested_codes: suggestions,
+        coding_status: transaction.account_code ? "coded" : "pending",
+      }
+    })
+
+    res.json({
+      transactions: enhancedTransactions,
+      summary: {
+        total: enhancedTransactions.length,
+        coded: enhancedTransactions.filter((t) => t.coding_status === "coded").length,
+        pending: enhancedTransactions.filter((t) => t.coding_status === "pending").length,
+      },
+    })
+  } catch (error) {
+    console.error("Error fetching transactions:", error)
+    res.status(500).json({ error: "Failed to fetch transactions" })
+  }
+})
+
+// Update transaction coding
+app.put("/api/transactions/:id/code", authenticateUser, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { account_code, notes } = req.body
+    const userId = req.user.id
+
+    // Validate account code exists
+    const account = accountCoding.getAccount(account_code)
+    if (!account) {
+      return res.status(400).json({ error: "Invalid account code" })
+    }
+
+    // Update transaction
+    const { data, error } = await supabase
+      .from("transactions")
+      .update({
+        account_code,
+        notes: notes || null,
+        coded_at: new Date().toISOString(),
+        coded_by: userId,
+      })
+      .eq("id", id)
+      .eq("user_id", userId)
+      .select()
+      .single()
+
+    if (error) {
+      console.error("Error updating transaction coding:", error)
+      return res.status(500).json({ error: "Failed to update transaction coding" })
+    }
+
+    res.json({
+      transaction: {
+        ...data,
+        account_name: account.name,
+        account_type: account.type,
+        tax_code: account.taxCode,
+      },
+    })
+  } catch (error) {
+    console.error("Error updating transaction coding:", error)
+    res.status(500).json({ error: "Failed to update transaction coding" })
+  }
+})
+
+// Bulk update transaction coding
+app.put("/api/transactions/bulk-code", authenticateUser, async (req, res) => {
+  try {
+    const { updates } = req.body // Array of { id, account_code, notes }
+    const userId = req.user.id
+
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({ error: "Invalid updates array" })
+    }
+
+    const results = []
+    const errors = []
+
+    for (const update of updates) {
+      try {
+        const { id, account_code, notes } = update
+
+        // Validate account code
+        const account = accountCoding.getAccount(account_code)
+        if (!account) {
+          errors.push({ id, error: "Invalid account code" })
+          continue
+        }
+
+        // Update transaction
+        const { data, error } = await supabase
+          .from("transactions")
+          .update({
+            account_code,
+            notes: notes || null,
+            coded_at: new Date().toISOString(),
+            coded_by: userId,
+          })
+          .eq("id", id)
+          .eq("user_id", userId)
+          .select()
+          .single()
+
+        if (error) {
+          errors.push({ id, error: error.message })
+        } else {
+          results.push({
+            ...data,
+            account_name: account.name,
+            account_type: account.type,
+            tax_code: account.taxCode,
+          })
+        }
+      } catch (err) {
+        errors.push({ id: update.id, error: err.message })
+      }
+    }
+
+    res.json({
+      success: results.length,
+      errors: errors.length,
+      results,
+      errors,
+    })
+  } catch (error) {
+    console.error("Error bulk updating transaction coding:", error)
+    res.status(500).json({ error: "Failed to bulk update transaction coding" })
+  }
+})
+
+// Auto-code transactions
+app.post("/api/transactions/auto-code", authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id
+    const { upload_id, overwrite = false } = req.body
+
+    let query = supabase.from("transactions").select("*").eq("user_id", userId)
+
+    if (upload_id) {
+      query = query.eq("upload_id", upload_id)
+    }
+
+    if (!overwrite) {
+      query = query.is("account_code", null)
+    }
+
+    const { data: transactions, error } = await query
+
+    if (error) {
+      console.error("Error fetching transactions for auto-coding:", error)
+      return res.status(500).json({ error: "Failed to fetch transactions" })
+    }
+
+    const updates = []
+    const errors = []
+
+    for (const transaction of transactions) {
+      try {
+        const accountCode = accountCoding.autoCodeTransaction(
+          transaction.description,
+          transaction.amount,
+          transaction.is_income,
+        )
+
+        const { error: updateError } = await supabase
+          .from("transactions")
+          .update({
+            account_code: accountCode,
+            coded_at: new Date().toISOString(),
+            coded_by: userId,
+            notes: "Auto-coded",
+          })
+          .eq("id", transaction.id)
+
+        if (updateError) {
+          errors.push({ id: transaction.id, error: updateError.message })
+        } else {
+          updates.push({
+            id: transaction.id,
+            account_code: accountCode,
+            account_name: accountCoding.getAccount(accountCode)?.name,
+          })
+        }
+      } catch (err) {
+        errors.push({ id: transaction.id, error: err.message })
+      }
+    }
+
+    res.json({
+      message: `Auto-coded ${updates.length} transactions`,
+      success: updates.length,
+      errors: errors.length,
+      updates,
+      errors,
+    })
+  } catch (error) {
+    console.error("Error auto-coding transactions:", error)
+    res.status(500).json({ error: "Failed to auto-code transactions" })
+  }
+})
+
+// File processing endpoint (enhanced with auto-coding)
 app.post("/api/process-file", authenticateUser, upload.single("file"), async (req, res) => {
-  // ADD TIMEOUT HERE - at the very beginning
   const timeout = setTimeout(() => {
     console.log("⚠️ Processing timeout after 30 seconds")
     if (!res.headersSent) {
       res.status(408).json({ error: "Processing timeout" })
     }
-  }, 30000) // 30 second timeout
+  }, 30000)
 
   try {
     console.log("📁 File upload request received")
@@ -151,13 +414,12 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
     const userId = req.user.id
 
     if (!file) {
-      clearTimeout(timeout) // CLEAR TIMEOUT
+      clearTimeout(timeout)
       return res.status(400).json({ error: "No file uploaded" })
     }
 
     console.log(`Processing file: ${file.originalname} for user: ${userId}`)
 
-    // Generate a unique file path
     const filePath = `processed/${uuidv4()}-${file.originalname}`
 
     // Create upload record
@@ -179,7 +441,7 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       throw dbError
     }
 
-    // Process the file based on type
+    // Process the file
     let parseResult = {
       success: false,
       transactions: [],
@@ -188,11 +450,9 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
     }
 
     if (file.mimetype === "application/pdf") {
-      // Check if it's a Starling Bank statement
       if (file.originalname.toLowerCase().includes("starling")) {
         parseResult = await parseStarlingStatement(file.buffer)
       } else {
-        // Generic PDF parsing
         const pdfData = await pdf(file.buffer)
         parseResult = {
           success: true,
@@ -207,7 +467,6 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
         }
       }
     } else if (file.mimetype === "text/csv" || file.mimetype === "application/vnd.ms-excel") {
-      // CSV parsing logic would go here
       parseResult = {
         success: true,
         transactions: [],
@@ -220,28 +479,36 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       }
     }
 
-    // Store transactions in database if any were found
+    // Store transactions with auto-coding
     if (parseResult.success && parseResult.transactions.length > 0) {
-      // Remove duplicate transactions based on date and amount
       const uniqueTransactions = removeDuplicateTransactions(parseResult.transactions)
       console.log(`Removed ${parseResult.transactions.length - uniqueTransactions.length} duplicate transactions`)
 
-      const { error: txError } = await supabase.from("transactions").insert(
-        uniqueTransactions.map((tx) => ({
+      const transactionsToInsert = uniqueTransactions.map((tx) => {
+        // Auto-code the transaction
+        const accountCode = accountCoding.autoCodeTransaction(tx.description, tx.amount, tx.type === "income")
+
+        return {
           user_id: userId,
           upload_id: uploadRecord.id,
-          transaction_date: formatDate(tx.date), // Format date to YYYY-MM-DD
+          transaction_date: formatDate(tx.date),
           description: tx.description,
           amount: tx.amount,
           is_income: tx.type === "income",
           category: tx.category,
-        })),
-      )
+          account_code: accountCode,
+          coded_at: new Date().toISOString(),
+          coded_by: userId,
+          notes: "Auto-coded on import",
+        }
+      })
+
+      const { error: txError } = await supabase.from("transactions").insert(transactionsToInsert)
 
       if (txError) {
         console.error("Error storing transactions:", txError)
       } else {
-        console.log(`✅ Stored ${uniqueTransactions.length} transactions`)
+        console.log(`✅ Stored ${uniqueTransactions.length} transactions with auto-coding`)
       }
     }
 
@@ -256,7 +523,7 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       .eq("id", uploadRecord.id)
 
     console.log("✅ File processed successfully")
-    clearTimeout(timeout) // CLEAR TIMEOUT BEFORE RESPONSE
+    clearTimeout(timeout)
     res.json({
       uploadId: uploadRecord.id,
       summary: {
@@ -272,20 +539,17 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       transactionCount: parseResult.transactions.length,
     })
   } catch (error) {
-    clearTimeout(timeout) // CLEAR TIMEOUT ON ERROR
+    clearTimeout(timeout)
     console.error("File processing error:", error)
     res.status(500).json({ error: "Failed to process file", details: error.message })
   }
 })
-
-// Add this route after the file processing endpoint
 
 // Route to fix stuck uploads
 app.post("/api/fix-uploads", authenticateUser, async (req, res) => {
   try {
     const userId = req.user.id
 
-    // Find all uploads in "processing" status
     const { data: stuckUploads, error: findError } = await supabase
       .from("uploads")
       .select("id")
@@ -301,7 +565,6 @@ app.post("/api/fix-uploads", authenticateUser, async (req, res) => {
       return res.json({ message: "No stuck uploads found", fixed: 0 })
     }
 
-    // Update all stuck uploads to "completed" status
     const { error: updateError } = await supabase
       .from("uploads")
       .update({ status: "completed" })
@@ -327,7 +590,6 @@ app.post("/api/fix-uploads", authenticateUser, async (req, res) => {
 function removeDuplicateTransactions(transactions) {
   const seen = new Set()
   return transactions.filter((tx) => {
-    // Create a unique key for each transaction based on date, amount, and description
     const key = `${tx.date}-${tx.amount}-${tx.description.substring(0, 10)}`
     if (seen.has(key)) {
       return false
@@ -350,12 +612,10 @@ app.use((err, req, res, next) => {
 process.on("uncaughtException", (error) => {
   console.error("💥 Uncaught Exception:", error)
   console.error("Stack:", error.stack)
-  // Don't exit immediately, let Railway handle it
 })
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("💥 Unhandled Rejection at:", promise, "reason:", reason)
-  // Don't exit immediately, let Railway handle it
 })
 
 // Start server
@@ -376,4 +636,3 @@ process.on("SIGTERM", () => {
 })
 
 module.exports = app
-
