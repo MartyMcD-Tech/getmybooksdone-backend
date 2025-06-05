@@ -1,21 +1,16 @@
 const express = require("express")
 const cors = require("cors")
-const mongoose = require("mongoose")
-const session = require("express-session")
-const passport = require("passport")
-const LocalStrategy = require("passport-local").Strategy
-const bcrypt = require("bcrypt")
-const User = require("./models/User")
-const bookRoutes = require("./routes/bookRoutes")
-const authRoutes = require("./routes/authRoutes")
-const dotenv = require("dotenv")
-
-dotenv.config()
+const multer = require("multer")
+const { createClient } = require("@supabase/supabase-js")
+const pdf = require("pdf-parse")
+const csv = require("csv-parser")
+const { v4: uuidv4 } = require("uuid")
+require("dotenv").config()
 
 const app = express()
-const port = process.env.PORT || 5000
+const PORT = process.env.PORT || 3001
 
-// Middleware
+// Basic middleware
 app.use(express.json())
 
 // Updated CORS configuration to allow your Vercel frontend
@@ -28,86 +23,133 @@ app.use(
   }),
 )
 
-// Session configuration
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "your-secret-key",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === "production", // Set to true in production if using HTTPS
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
-      httpOnly: true,
-      sameSite: "lax", // Adjust as needed
-    },
-  }),
-)
-
-// Passport middleware
-app.use(passport.initialize())
-app.use(passport.session())
-
-// Passport configuration
-passport.use(
-  new LocalStrategy({ usernameField: "email" }, (email, password, done) => {
-    User.findOne({ email: email })
-      .then((user) => {
-        if (!user) {
-          return done(null, false, { message: "Incorrect email." })
-        }
-        bcrypt.compare(password, user.password, (err, res) => {
-          if (err) {
-            return done(err)
-          }
-          if (res) {
-            // Passwords match, log user in
-            return done(null, user)
-          } else {
-            // Passwords do not match
-            return done(null, false, { message: "Incorrect password." })
-          }
-        })
-      })
-      .catch((err) => {
-        return done(err)
-      })
-  }),
-)
-
-passport.serializeUser((user, done) => {
-  done(null, user.id)
+// Health check route
+app.get("/health", (req, res) => {
+  res.json({
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || "development",
+  })
 })
 
-passport.deserializeUser((id, done) => {
-  User.findById(id)
-    .then((user) => {
-      done(null, user)
-    })
-    .catch((err) => done(err))
+// Basic test route
+app.get("/", (req, res) => {
+  res.json({
+    message: "Get My Books Done API",
+    version: "1.0.0",
+    status: "running",
+  })
 })
 
-// MongoDB Connection
-mongoose
-  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/books", {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => {
-    console.log("Connected to MongoDB")
-  })
-  .catch((err) => {
-    console.error("MongoDB connection error:", err)
-  })
+// Initialize Supabase
+const supabase = createClient(
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+)
+
+// Configure multer for in-memory file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ["application/pdf", "text/csv", "application/vnd.ms-excel"]
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true)
+    } else {
+      cb(new Error("Invalid file type. Only PDF and CSV files are allowed."))
+    }
+  },
+})
+
+// Authentication middleware
+const authenticateUser = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "")
+
+    if (!token) {
+      return res.status(401).json({ error: "No token provided" })
+    }
+
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token)
+
+    if (error || !user) {
+      return res.status(401).json({ error: "Invalid token" })
+    }
+
+    req.user = user
+    next()
+  } catch (error) {
+    console.error("Auth error:", error)
+    res.status(401).json({ error: "Authentication failed" })
+  }
+}
 
 // Routes
-app.use("/api/books", bookRoutes)
-app.use("/api/auth", authRoutes)
 
-app.get("/", (req, res) => {
-  res.send("Server is running!")
+// Basic file processing endpoint
+app.post("/api/process-file", authenticateUser, upload.single("file"), async (req, res) => {
+  try {
+    const file = req.file
+    const userId = req.user.id
+
+    if (!file) {
+      return res.status(400).json({ error: "No file uploaded" })
+    }
+
+    console.log(`Processing file: ${file.originalname} for user: ${userId}`)
+
+    // Create upload record
+    const { data: uploadRecord, error: dbError } = await supabase
+      .from("uploads")
+      .insert({
+        user_id: userId,
+        file_name: file.originalname,
+        file_type: file.mimetype,
+        file_size: `${(file.size / 1024).toFixed(1)} KB`,
+        file_path: `processed/${uuidv4()}-${file.originalname}`,
+        status: "completed",
+      })
+      .select()
+      .single()
+
+    if (dbError) {
+      console.error("Database error:", dbError)
+      throw dbError
+    }
+
+    res.json({
+      uploadId: uploadRecord.id,
+      summary: {
+        totalIncome: 0,
+        totalExpenses: 0,
+        transactionCount: 0,
+      },
+      accountInfo: {},
+      transactionCount: 0,
+    })
+  } catch (error) {
+    console.error("File processing error:", error)
+    res.status(500).json({ error: "Failed to process file", details: error.message })
+  }
 })
 
-// Start the server
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`)
+// Error handling
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err)
+  res.status(500).json({
+    error: "Internal server error",
+    ...(process.env.NODE_ENV === "development" && { details: err.message }),
+  })
 })
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`)
+})
+
+module.exports = app
