@@ -8,13 +8,18 @@ const { v4: uuidv4 } = require("uuid")
 require("dotenv").config()
 
 const app = express()
-// Use Railway's PORT environment variable or default to 8080
 const PORT = process.env.PORT || 8080
+
+console.log("🚀 Starting Get My Books Done API...")
+console.log("Environment variables check:")
+console.log("- PORT:", PORT)
+console.log("- SUPABASE_URL:", !!process.env.SUPABASE_URL)
+console.log("- SUPABASE_SERVICE_ROLE_KEY:", !!process.env.SUPABASE_SERVICE_ROLE_KEY)
 
 // Basic middleware
 app.use(express.json())
 
-// Updated CORS configuration to allow your Vercel frontend
+// CORS configuration
 app.use(
   cors({
     origin: ["https://v0-getmybooksdone-frontend.vercel.app", "http://localhost:3000"],
@@ -24,40 +29,53 @@ app.use(
   }),
 )
 
-// Special test endpoint to verify our code is running
+// Test endpoint to verify our server is running
 app.get("/custom-test", (req, res) => {
+  console.log("Custom test endpoint hit!")
   res.json({
-    message: "This is our custom server!",
+    message: "✅ Our custom server is running!",
     timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
     cors: "Configured for v0-getmybooksdone-frontend.vercel.app",
   })
 })
 
 // Health check route
 app.get("/health", (req, res) => {
+  console.log("Health check requested")
   res.json({
     status: "OK",
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || "development",
+    uptime: process.uptime(),
   })
 })
 
-// Basic test route
+// Root route
 app.get("/", (req, res) => {
+  console.log("Root endpoint hit!")
   res.json({
     message: "Get My Books Done API",
     version: "1.0.0",
     status: "running",
+    timestamp: new Date().toISOString(),
   })
 })
 
-// Initialize Supabase
-const supabase = createClient(
-  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-)
+// Initialize Supabase with error handling
+let supabase
+try {
+  supabase = createClient(
+    process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY,
+  )
+  console.log("✅ Supabase client initialized")
+} catch (error) {
+  console.error("❌ Failed to initialize Supabase:", error)
+  process.exit(1)
+}
 
-// Configure multer for in-memory file uploads
+// Configure multer
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -99,11 +117,10 @@ const authenticateUser = async (req, res, next) => {
   }
 }
 
-// Routes
-
-// Basic file processing endpoint
+// File processing endpoint
 app.post("/api/process-file", authenticateUser, upload.single("file"), async (req, res) => {
   try {
+    console.log("📁 File upload request received")
     const file = req.file
     const userId = req.user.id
 
@@ -132,6 +149,7 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
       throw dbError
     }
 
+    console.log("✅ File processed successfully")
     res.json({
       uploadId: uploadRecord.id,
       summary: {
@@ -148,7 +166,7 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
   }
 })
 
-// Error handling
+// Error handling middleware
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err)
   res.status(500).json({
@@ -157,11 +175,33 @@ app.use((err, req, res, next) => {
   })
 })
 
+// Global error handlers
+process.on("uncaughtException", (error) => {
+  console.error("💥 Uncaught Exception:", error)
+  console.error("Stack:", error.stack)
+  // Don't exit immediately, let Railway handle it
+})
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("💥 Unhandled Rejection at:", promise, "reason:", reason)
+  // Don't exit immediately, let Railway handle it
+})
+
 // Start server
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`)
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`)
   console.log(`CORS configured for: https://v0-getmybooksdone-frontend.vercel.app`)
+  console.log(`✅ Server started successfully at ${new Date().toISOString()}`)
+})
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("🛑 SIGTERM received, shutting down gracefully")
+  server.close(() => {
+    console.log("✅ Server closed")
+    process.exit(0)
+  })
 })
 
 module.exports = app
