@@ -209,12 +209,11 @@ app.post("/api/process-file", authenticateUser, upload.single("file"), async (re
         parseResult.transactions.map((tx) => ({
           user_id: userId,
           upload_id: uploadRecord.id,
-          date: tx.date,
+          transaction_date: tx.date, // Changed from 'date' to 'transaction_date'
           description: tx.description,
           amount: tx.amount,
-          type: tx.type,
+          is_income: tx.type === "income", // Changed from 'type' to 'is_income' boolean
           category: tx.category,
-          // Removed currency field since it doesn't exist in the table
         })),
       )
 
