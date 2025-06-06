@@ -6,7 +6,7 @@ const pdf = require("pdf-parse")
 const csv = require("csv-parser")
 const { v4: uuidv4 } = require("uuid")
 const { parseStarlingStatement } = require("./parsers/starling-parser")
-const AccountCodingService = require("./services/accountCoding")
+const AccountCodingService = require("./services/accountCoding.js")
 require("dotenv").config()
 
 const app = express()
@@ -585,6 +585,10 @@ app.post("/api/fix-uploads", authenticateUser, async (req, res) => {
     res.status(500).json({ error: "Failed to fix uploads", details: error.message })
   }
 })
+
+// Admin routes
+const adminRoutes = require("./routes/admin")
+app.use("/api/admin", authenticateUser, adminRoutes)
 
 // Function to remove duplicate transactions
 function removeDuplicateTransactions(transactions) {
